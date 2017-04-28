@@ -22,13 +22,23 @@
 
 void *row_compute();
 void gauss_pthread();
+int min(int a, int b){
+  if (a >= b){
+    return b;
+  }else{
+    return a;
+  }
+}
 
 char *ID;
 
 /* Program Parameters */
 #define MAXN 5000  /* Max value of N */
+#define CHUNK_SIZE 100
 int N;  /* Matrix size */
 int procs;  /* Number of processors to use */
+int row_count;
+pthread_mutex_t row_lock;
 
 /* Matrices and vectors */
 volatile float A[MAXN][MAXN], B[MAXN], X[MAXN];
@@ -174,9 +184,11 @@ int main(int argc, char **argv) {
   etstart2 = times(&cputstart);
 
   /* Gaussian Elimination */
+  pthread_mutex_init(&row_lock, NULL);
 
   //gauss();
   gauss_pthread();
+
 
   /* Stop Clock */
   gettimeofday(&etstop, &tzdummy);
@@ -192,6 +204,7 @@ int main(int argc, char **argv) {
   printf("\nElapsed time = %g ms.\n",
 	 (float)(usecstop - usecstart)/(float)1000);
 
+   pthread_mutex_destroy(&row_lock);
    pthread_exit(NULL);
 
 
@@ -199,51 +212,57 @@ int main(int argc, char **argv) {
 
 /*------------------------------------------------------------- */
 /*Description:
-  We parallel calculations of each norm by allocating processors with intervals
-  of procs(numbers of processors) to update each row. Each processor
-  concurrently update a row.
+  The outside loop cannot be paralleled, so we parallel row calculations
+  for each norm(or column).
+  We define CHUNK_SIZE at the beginning, which is the data size each processor
+  can get at a time and we dynamically allocate the task to a processor which
+  have finished its work The faster the processor, the more task it will
+  processes.
+  We can change CHUNK_SIZE to improve parallel effect.
 */
 
-/*self defined structure to pass parameters*/
-struct mypara{
-  int norm;
-  int proc;
-};
 
-void *compute(void *p){
-  mypara *para;
-  para = (struct mypara *) p;
-  int row = para->norm + para->proc + 1;
-  int norm = para->norm;
+void *compute(void *n){
+
+  long norm = (long)n;
+  int row_1;
+  int j = 0;
   float multiplier;
-  for (row; row < N; row += procs) {
-      multiplier = A[row][norm] / A[norm][norm];
-      for (int col = norm; col < N; col++) {
-	       A[row][col] -= A[norm][col] * multiplier;
-      }
-      B[row] -= B[norm] * multiplier;
-    }
+  while(j < N){
+    pthread_mutex_lock(&row_lock);
+    //atomic add the row_count that has been allocated
+    j = row_count;
+    row_count += CHUNK_SIZE;
+
+    pthread_mutex_unlock(&row_lock);
+
+        for(row_1 = j; row_1<min(j+CHUNK_SIZE, N); row_1++){
+          multiplier = A[row_1][norm] / A[norm][norm];
+          for (int col = norm; col < N; col++) {
+    	       A[row_1][col] -= A[norm][col] * multiplier;
+          }
+          B[row_1] -= B[norm] * multiplier;
+        }
+  }
 }
 
 void gauss_pthread(){
   int norm, row, col;
 
   pthread_t threads[procs];
-  mypara paras[procs];
+
   printf("Computing in pthread!\n");
   for(norm = 0; norm < N - 1; norm++){
+    row_count = norm + 1;
 
     for (int i = 0; i < procs; i++){
-      /* pass norm and threadid to each processor*/
-	paras[i].norm = norm;
-	paras[i].proc = i;
-	pthread_create(&threads[i],NULL,&compute,(void*)(paras + i));
+
+	pthread_create(&threads[i],NULL,&compute,(void*)norm);
     }
     for (int i = 0; i < procs; i++){
 	pthread_join(threads[i], NULL);
     }
   }
-  pthread_exit(NULL);
 
   /* Back substitution */
   for (row = N - 1; row >= 0; row--) {
